@@ -920,12 +920,11 @@ PlanBackend::Context::InitializeExecuteInputBinding(
 
     MemoryFormat fmt =
         ConvertTrtFmtToFmt(engine_->getBindingFormat(binding_index));
-    if (fmt != MemoryFormat::LINEAR) {
+    if (fmt == MemoryFormat::INVALID) {
       return Status(
           Status::Code::INVALID_ARG,
-          "unexpected tensor format " + MemoryFormat_Name(fmt) +
-              " for input '" + input_name +
-              "'. Only LINEAR memory format is supported at present.");
+          "unexpected tensor format " + MemoryFormat_Name(fmt) + " for input '" +
+              input_name + "'.");
     }
 
     nvinfer1::Dims engine_dims = engine_->getBindingDimensions(binding_index);
@@ -951,7 +950,7 @@ PlanBackend::Context::InitializeExecuteInputBinding(
     if (!(is_control && is_dynamic_)) {
       RETURN_IF_ERROR(CompareDimsSupported(
           name_, input_name, engine_dims, model_config_dims, support_batching_,
-          is_dynamic_, false /* compare_exact */));
+          is_dynamic_, false /* compare_exact */, fmt));
     } else {
       Status status =
           ValidateControlDimsDynamic(engine_dims, support_batching_);
@@ -1283,12 +1282,11 @@ PlanBackend::Context::InitializeConfigExecuteOutputBindings(
 
       MemoryFormat fmt =
           ConvertTrtFmtToFmt(engine_->getBindingFormat(binding_index));
-      if (fmt != MemoryFormat::LINEAR) {
+      if (fmt == MemoryFormat::INVALID) {
         return Status(
             Status::Code::INVALID_ARG,
             "unexpected tensor format " + MemoryFormat_Name(fmt) +
-                " for output '" + io.name() +
-                "'. Only LINEAR memory format is supported at present.");
+                " for output '" + io.name() + "'.");
       }
 
       const DimsList& model_config_dims =
@@ -1312,7 +1310,7 @@ PlanBackend::Context::InitializeConfigExecuteOutputBindings(
 
       RETURN_IF_ERROR(CompareDimsSupported(
           name_, io.name(), engine_dims, model_config_dims, support_batching_,
-          is_dynamic_, false /* compare_exact */));
+          is_dynamic_, false /* compare_exact */, fmt));
 
       int64_t byte_size;
       if (!is_dynamic_) {
