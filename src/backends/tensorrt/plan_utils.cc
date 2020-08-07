@@ -168,7 +168,7 @@ CompareDimsSupported(
     const std::string& model_name, const std::string& binding_name,
     const nvinfer1::Dims& model_dims, const DimsList& dims,
     const bool supports_batching, const bool is_dynamic,
-    const bool compare_exact, const MemoryFormat fmt)
+    const bool compare_exact, const std::pair<int, int64_t>& padding)
 {
   // If the model configuration expects batching support in the model,
   // then the first dimension must be -1.
@@ -195,12 +195,8 @@ CompareDimsSupported(
         int64_t model_dim = model_dims.d[i];
         if (compare_exact || (model_dim != -1)) {
           // Pad channel dimension if necessary.
-          if (i == dims.size() - 3) {
-            int vector_size = MemoryFormat_VectorSize(fmt);
-            if (vector_size > 1)
-            {
-              model_dim = model_dim + vector_size - ((model_dim + vector_size) % vector_size);
-            }
+          if (i == padding.first) {
+            model_dim += padding.second;
           }
           succ &= (model_dim == full_dims[i]);
         }
@@ -228,12 +224,8 @@ CompareDimsSupported(
         int64_t model_dim = model_dims.d[i];
         if (compare_exact || (model_dim != -1)) {
           // Pad channel dimension if necessary.
-          if (i == dims.size() - 3) {
-            int vector_size = MemoryFormat_VectorSize(fmt);
-            if (vector_size > 1)
-            {
-              model_dim = model_dim + vector_size - ((model_dim + vector_size) % vector_size);
-            }
+          if (i == padding.first) {
+            model_dim += padding.second;
           }
           succ &= (model_dim == dims[i]);
         }
@@ -296,6 +288,7 @@ Status
 MaximumDims(
     const nvinfer1::Dims& max_profile_dims, const DimsList& dims,
     const bool support_batching, const int max_batch_size,
+    const std::pair<int, int64_t>& padding,
     std::vector<int64_t>* max_dims)
 {
   const int nonbatch_start_idx = (support_batching ? 1 : 0);
@@ -320,14 +313,20 @@ MaximumDims(
   for (int i = 0; i < dims.size(); ++i) {
     if (dims[i] == WILDCARD_DIM) {
       max_dims->emplace_back(max_profile_dims.d[i + nonbatch_start_idx]);
-    } else if (dims[i] <= max_profile_dims.d[i + nonbatch_start_idx]) {
-      max_dims->emplace_back(dims[i]);
     } else {
-      return Status(
-          Status::Code::INVALID_ARG,
-          "can not maximize dimension " + DimsListToString(dims) + " to " +
-              DimsDebugString(max_profile_dims) + " due to  incompatibility.");
-    }
+      auto max_profile_dim = max_profile_dims.d[i + nonbatch_start_idx];
+      if (i + nonbatch_start_idx == padding.first) {
+        max_profile_dim += padding.second;
+      }
+      if (dims[i] <= max_profile_dim) {
+      max_dims->emplace_back(dims[i]);
+      } else {
+        return Status(
+            Status::Code::INVALID_ARG,
+            "can not maximize dimension " + DimsListToString(dims) + " to " +
+                DimsDebugString(max_profile_dims) + " (without padding) due to incompatibility.");
+      }
+    } 
   }
   return Status::Success;
 }
@@ -416,16 +415,17 @@ ValidateShapeValues(
 }
 
 void
-DimsToDimVec(const nvinfer1::Dims& model_dims, std::vector<int64_t>* dims)
+DimsToDimVec(const nvinfer1::Dims& model_dims, const std::pair<int, int64_t>& padding, std::vector<int64_t>* dims)
 {
   dims->clear();
   for (int i = 0; i < model_dims.nbDims; ++i) {
     dims->emplace_back(model_dims.d[i]);
   }
+  (*dims)[padding.first] += padding.second;
 }
 
 bool
-DimVecToDims(const std::vector<int64_t>& dim_vec, nvinfer1::Dims* dims)
+DimVecToDims(const std::vector<int64_t>& dim_vec, const std::pair<int, int64_t>& padding, nvinfer1::Dims* dims)
 {
   if (dim_vec.size() > dims->MAX_DIMS) {
     return false;
@@ -434,6 +434,7 @@ DimVecToDims(const std::vector<int64_t>& dim_vec, nvinfer1::Dims* dims)
     for (int i = 0; i < dims->nbDims; ++i) {
       dims->d[i] = (int)dim_vec[i];
     }
+    dims->d[padding.first] -= padding.second;
   }
   return true;
 }
@@ -463,7 +464,7 @@ const std::string
 DimsDebugString(const nvinfer1::Dims& dims)
 {
   std::vector<int64_t> dims_vec;
-  DimsToDimVec(dims, &dims_vec);
+  DimsToDimVec(dims, {0, 0}, &dims_vec);
   return DimsListToString(dims_vec);
 }
 

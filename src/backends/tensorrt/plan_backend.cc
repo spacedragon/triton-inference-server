@@ -795,6 +795,8 @@ PlanBackend::Context::InitializeShapeInputBinding(
               " for input '" + input_name +
               "'. Only LINEAR memory format is supported at present.");
     }
+    // placeholder that does nothing
+    padding_info_[binding_index] = std::make_pair(0, 0);
 
     nvinfer1::Dims engine_dims = engine_->getBindingDimensions(binding_index);
 
@@ -838,7 +840,8 @@ PlanBackend::Context::InitializeShapeInputBinding(
     if (engine_->isExecutionBinding(binding_index)) {
       std::vector<int64_t> dim_vec;
       DimsToDimVec(
-          context.context_->getBindingDimensions(binding_index), &dim_vec);
+          context.context_->getBindingDimensions(binding_index),
+          padding_info_[binding_index], &dim_vec);
       int64_t byte_size = GetByteSize(dt, dim_vec);
       max_byte_size = std::max(max_byte_size, byte_size);
     }
@@ -928,6 +931,17 @@ PlanBackend::Context::InitializeExecuteInputBinding(
     }
 
     nvinfer1::Dims engine_dims = engine_->getBindingDimensions(binding_index);
+
+    int vector_size = MemoryFormat_VectorSize(fmt);
+    if (vector_size > 1) {
+      int dim_idx = engine_dims.nbDims - 3;
+      int64_t padding_offset = vector_size - (engine_dims.d[dim_idx] % vector_size);
+      padding_info_[binding_index] = std::make_pair(dim_idx, padding_offset);
+    } else {
+      // placeholder that does nothing
+      padding_info_[binding_index] = std::make_pair(0, 0);
+    }
+
     // Detect whether dynamic or not
     if (ContainsWildcard(engine_dims)) {
       is_dynamic_ = true;
@@ -950,7 +964,7 @@ PlanBackend::Context::InitializeExecuteInputBinding(
     if (!(is_control && is_dynamic_)) {
       RETURN_IF_ERROR(CompareDimsSupported(
           name_, input_name, engine_dims, model_config_dims, support_batching_,
-          is_dynamic_, false /* compare_exact */, fmt));
+          is_dynamic_, false /* compare_exact */, padding_info_[binding_index]));
     } else {
       Status status =
           ValidateControlDimsDynamic(engine_dims, support_batching_);
@@ -977,7 +991,7 @@ PlanBackend::Context::InitializeExecuteInputBinding(
 
       Status status = ValidateDimension(
           model_config_dims, context.min_dims_[io_index],
-          context.max_dims_[io_index], support_batching_);
+          context.max_dims_[io_index], support_batching_, padding_info_[io_index]);
       if (!status.IsOk()) {
         return Status(
             Status::Code::INTERNAL,
@@ -987,10 +1001,10 @@ PlanBackend::Context::InitializeExecuteInputBinding(
       }
       RETURN_IF_ERROR(MaximumDims(
           context.max_dims_[io_index], model_config_dims, support_batching_,
-          max_batch_size_, &maximum_dims));
+          max_batch_size_, padding_info_[io_index], &maximum_dims));
       byte_size = GetByteSize(dt, maximum_dims);
       // Update the maximum dimension with respect to the allocated buffer
-      DimVecToDims(maximum_dims, &context.max_dims_[io_index]);
+      DimVecToDims(maximum_dims, padding_info_[io_index], &context.max_dims_[io_index]);
 
       if (!context.context_->setBindingDimensions(
               binding_index, context.max_dims_[io_index])) {
@@ -1185,6 +1199,8 @@ PlanBackend::Context::InitializeConfigShapeOutputBindings(
                 " for output '" + io.name() +
                 "'. Only LINEAR memory format is supported at present.");
       }
+      // placeholder that does nothing
+      padding_info_[binding_index] = std::make_pair(0, 0);
 
       const DimsList& model_config_dims =
           (io.has_reshape()) ? io.reshape().shape() : io.dims();
@@ -1198,7 +1214,7 @@ PlanBackend::Context::InitializeConfigShapeOutputBindings(
       const nvinfer1::Dims output_dim =
           context.context_->getBindingDimensions(binding_index);
       std::vector<int64_t> dim_vec;
-      DimsToDimVec(output_dim, &dim_vec);
+      DimsToDimVec(output_dim, padding_info_[binding_index], &dim_vec);
       int64_t byte_size = GetByteSize(dt, dim_vec);
 
       max_byte_size = std::max(max_byte_size, byte_size);
@@ -1294,6 +1310,15 @@ PlanBackend::Context::InitializeConfigExecuteOutputBindings(
 
       nvinfer1::Dims engine_dims = engine_->getBindingDimensions(binding_index);
 
+      int vector_size = MemoryFormat_VectorSize(fmt);
+      if (vector_size > 1) {
+        int dim_idx = engine_dims.nbDims - 3;
+        int64_t padding_offset = vector_size - (engine_dims.d[dim_idx] % vector_size);
+        padding_info_[binding_index] = std::make_pair(dim_idx, padding_offset);
+      } else {
+        // placeholder that does nothing
+        padding_info_[binding_index] = std::make_pair(0, 0);
+      }
       // Validate whether the binding supports maximum batch size specification
       // in the config
       if ((!engine_->hasImplicitBatchDimension()) &&
@@ -1310,7 +1335,7 @@ PlanBackend::Context::InitializeConfigExecuteOutputBindings(
 
       RETURN_IF_ERROR(CompareDimsSupported(
           name_, io.name(), engine_dims, model_config_dims, support_batching_,
-          is_dynamic_, false /* compare_exact */, fmt));
+          is_dynamic_, false /* compare_exact */, padding_info_[binding_index]));
 
       int64_t byte_size;
       if (!is_dynamic_) {
@@ -1319,7 +1344,7 @@ PlanBackend::Context::InitializeConfigExecuteOutputBindings(
         const nvinfer1::Dims output_dim =
             context.context_->getBindingDimensions(binding_index);
         std::vector<int64_t> dim_vec;
-        DimsToDimVec(output_dim, &dim_vec);
+        DimsToDimVec(output_dim, padding_info_[binding_index], &dim_vec);
         byte_size = GetByteSize(dt, dim_vec);
       }
 
@@ -1818,7 +1843,7 @@ PlanBackend::Context::Run(
     // Set the binding dimension so that output dimensions can be obtained
     if (is_dynamic_ && (!engine_->isShapeBinding(io_index))) {
       nvinfer1::Dims this_dim;
-      if (!DimVecToDims(batchn_shape, &this_dim)) {
+      if (!DimVecToDims(batchn_shape, padding_info_[io_index], &this_dim)) {
         FAIL_ALL_AND_RETURN_IF_ERROR(
             payload_->requests_, payload_->responses_, metric_reporter_.get(),
             Status(
@@ -2322,7 +2347,7 @@ PlanBackend::Context::GetMostOptimizedProfile(
         }
         auto status = ValidateDimension(
             input->Shape(), cit->second.min_dims_[io_index],
-            cit->second.max_dims_[io_index], true);
+            cit->second.max_dims_[io_index], true, padding_info_[io_index]);
         bool valid_bs =
             (((int64_t)total_batch_size >=
               cit->second.min_dims_[io_index].d[0]) &&
