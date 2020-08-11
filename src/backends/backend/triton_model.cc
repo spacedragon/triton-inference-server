@@ -592,6 +592,39 @@ TRITONBACKEND_RequestInput(
 }
 
 TRITONSERVER_Error*
+TRITONBACKEND_RequestInputByIndex(
+    TRITONBACKEND_Request* request, const uint32_t index,
+    TRITONBACKEND_Input** input)
+{
+  InferenceRequest* tr = reinterpret_cast<InferenceRequest*>(request);
+  const auto& inputs = tr->ImmutableInputs();
+  if (index >= inputs.size()) {
+    return TRITONSERVER_ErrorNew(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        (std::string("out of bounds index ") + std::to_string(index) +
+         ": request has " + std::to_string(inputs.size()) + " inputs")
+            .c_str());
+  }
+
+  // The request inputs are not allowed to change once the request
+  // makes it to the backend, so it is ok to just iterate through the
+  // map. This linear search is the best we can do given the need for
+  // the inputs to be in a map and given the typical small number of
+  // inputs is better than having every request maintain the inputs as
+  // both map and vector.
+  uint32_t cnt = 0;
+  for (const auto& pr : inputs) {
+    if (cnt++ == index) {
+      InferenceRequest::Input* in = pr.second;
+      *input = reinterpret_cast<TRITONBACKEND_Input*>(in);
+      break;
+    }
+  }
+
+  return nullptr;  // success
+}
+
+TRITONSERVER_Error*
 TRITONBACKEND_RequestOutputCount(
     TRITONBACKEND_Request* request, uint32_t* count)
 {
