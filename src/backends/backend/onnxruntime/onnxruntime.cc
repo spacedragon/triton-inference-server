@@ -610,7 +610,7 @@ ModelInstanceState::ValidateInputs(const size_t expected_input_cnt)
       RETURN_IF_ERROR(nib::CheckAllowedModelInput(io, input_tensor_names));
     }
 
-    auto onnx_data_type = ConvertToOnnxDataType(io_dtype);
+    auto onnx_data_type = ModelConfigDataTypeToOnnxDataType(io_dtype);
     if (onnx_data_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
       return TRITONSERVER_ErrorNew(
           TRITONSERVER_ERROR_INTERNAL,
@@ -669,7 +669,7 @@ ModelInstanceState::ValidateOutputs()
       RETURN_IF_ERROR(nib::CheckAllowedModelOutput(io, output_tensor_names));
     }
 
-    auto onnx_data_type = ConvertToOnnxDataType(io_dtype);
+    auto onnx_data_type = ModelConfigDataTypeToOnnxDataType(io_dtype);
     if (onnx_data_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
       return TRITONSERVER_ErrorNew(
           TRITONSERVER_ERROR_INTERNAL,
