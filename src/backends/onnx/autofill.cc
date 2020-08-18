@@ -26,16 +26,10 @@
 
 #include "src/backends/onnx/autofill.h"
 
-#include "src/backends/onnx/loader.h"
-#include "src/backends/onnx/onnx_utils.h"
-#include "src/core/autofill.h"
-#include "src/core/constants.h"
-#include "src/core/filesystem.h"
-#include "src/core/logging.h"
-#include "src/core/model_config.h"
 
 namespace nvidia { namespace inferenceserver {
 
+#if 0
 namespace {
 
 template <class ModelIO>
@@ -290,12 +284,18 @@ AutoFillOnnxImpl::SetBatchingSupport()
   return Status::Success;
 }
 
+#endif
+
 Status
 AutoFillOnnx::Create(
     const std::string& model_name, const std::string& model_path,
     std::unique_ptr<AutoFill>* autofill,
     const std::vector<std::string>& op_libraries)
 {
+    return Status(
+        Status::Code::INTERNAL, "autofill NYI");
+
+#if 0
   std::unique_ptr<AutoFillOnnxImpl> local_autofill;
 
   std::set<std::string> version_dirs;
@@ -453,6 +453,7 @@ AutoFillOnnx::Create(
 
   *autofill = std::move(local_autofill);
   return Status::Success;
+#endif
 }
 
 }}  // namespace nvidia::inferenceserver
