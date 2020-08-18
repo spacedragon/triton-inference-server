@@ -55,6 +55,7 @@ else
     LEAKCHECK_LOG_BASE="./valgrind_test"
     LEAKCHECK=/usr/bin/valgrind
     LEAKCHECK_ARGS_BASE="--leak-check=full --show-leak-kinds=definite --max-threads=3000"
+    rm -f $LEAKCHECK_LOG_BASE*
 fi
 
 if [ "$TEST_SYSTEM_SHARED_MEMORY" -eq 1 ] || [ "$TEST_CUDA_SHARED_MEMORY" -eq 1 ]; then
@@ -202,7 +203,6 @@ for TARGET in cpu gpu; do
     python $INFER_TEST >$CLIENT_LOG 2>&1
     if [ $? -ne 0 ]; then
         cat $CLIENT_LOG
-        echo -e "\n***\n*** Test Failed\n***"
         RET=1
     else
         check_test_results $CLIENT_LOG $EXPECTED_NUM_TESTS
@@ -220,20 +220,17 @@ for TARGET in cpu gpu; do
     wait $SERVER_PID
 
     if [ "$TEST_VALGRIND" -eq 1 ]; then
-
-        DEF_LOST_RECORDS=$(grep "are definitely lost" -A 10 $LEAKCHECK_LOG | awk 'BEGIN{RS="--"} !(/cnmem/||/NewSession\(tensorflow/) {print}')
-     
-        if [ -n "$DEF_LOST_RECORDS" ]; then
-            echo -e "$DEF_LOST_RECORDS"
-            echo -e "\n***\n*** Test FAILED\n***"
+        check_valgrind_log $LEAKCHECK_LOG 
+        if [ $? -ne 0 ]; then
             RET=1
         fi
-    fi
-    
+    fi 
 done
 
 if [ $RET -eq 0 ]; then
   echo -e "\n***\n*** Test Passed\n***"
+else
+  echo -e "\n***\n*** Test FAILED\n***"
 fi
 
 exit $RET

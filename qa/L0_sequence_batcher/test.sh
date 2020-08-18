@@ -47,6 +47,7 @@ if [ -z "$TEST_VALGRIND" ]; then
 else
     LEAKCHECK=/usr/bin/valgrind
     LEAKCHECK_ARGS_BASE="--leak-check=full --show-leak-kinds=definite --max-threads=3000"
+    rm -f *.valgrind.log
 fi
 
 DATADIR=${DATADIR:="/data/inferenceserver/${REPO_VERSION}"}
@@ -245,12 +246,8 @@ for model_trial in v 0 1 2 4; do
         wait $SERVER_PID
 
         if [ "$TEST_VALGRIND" -eq 1 ]; then
-
-            DEF_LOST_RECORDS=$(grep "are definitely lost" -A 10 $LEAKCHECK_LOG | awk 'BEGIN{RS="--"} !(/cnmem/||/NewSession\(tensorflow/) {print}')
-     
-            if [ -n "$DEF_LOST_RECORDS" ]; then
-                echo -e "$DEF_LOST_RECORDS"
-                echo -e "\n***\n*** Test FAILED\n***"
+            check_valgrind_log $LEAKCHECK_LOG 
+            if [ $? -ne 0 ]; then
                 RET=1
             fi
         fi
@@ -321,12 +318,8 @@ for model_trial in v 0 1 2 4; do
         wait $SERVER_PID
 
         if [ "$TEST_VALGRIND" -eq 1 ]; then
-
-            DEF_LOST_RECORDS=$(grep "are definitely lost" -A 10 $LEAKCHECK_LOG | awk 'BEGIN{RS="--"} !(/cnmem/||/NewSession\(tensorflow/) {print}')
-     
-            if [ -n "$DEF_LOST_RECORDS" ]; then
-                echo -e "$DEF_LOST_RECORDS"
-                echo -e "\n***\n*** Test FAILED\n***"
+            check_valgrind_log $LEAKCHECK_LOG 
+            if [ $? -ne 0 ]; then
                 RET=1
             fi
         fi
@@ -395,12 +388,8 @@ if [[ $BACKENDS == *"custom"* ]]; then
       wait $SERVER_PID
 
       if [ "$TEST_VALGRIND" -eq 1 ]; then
-
-          DEF_LOST_RECORDS=$(grep "are definitely lost" -A 10 $LEAKCHECK_LOG | awk 'BEGIN{RS="--"} !(/cnmem/||/NewSession\(tensorflow/) {print}')
-    
-          if [ -n "$DEF_LOST_RECORDS" ]; then
-              echo -e "$DEF_LOST_RECORDS"
-              echo -e "\n***\n*** Test FAILED\n***"
+          check_valgrind_log $LEAKCHECK_LOG 
+          if [ $? -ne 0 ]; then
               RET=1
           fi
       fi
