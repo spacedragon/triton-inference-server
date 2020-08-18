@@ -26,6 +26,8 @@
 
 #include "src/backends/backend/examples/backend_memory.h"
 
+#include "src/backends/backend/examples/backend_utils.h"
+
 #ifdef TRITON_ENABLE_GPU
 #include <cuda_runtime_api.h>
 #endif  // TRITON_ENABLE_GPU
@@ -45,7 +47,7 @@ BackendMemory::Create(
       (preferred_memtype == TRITONSERVER_MEMORY_CPU) ||
           (preferred_memtype == TRITONSERVER_MEMORY_CPU_PINNED),
       TRITONSERVER_ERROR_INTERNAL,
-      "BackendMemory only supports CPU and CPU_PINNED memory");
+      std::string("BackendMemory only supports CPU and CPU_PINNED memory"));
 
   // If PINNED memory is preferred and GPU is enabled then attempt
   // that memory first.
@@ -61,7 +63,7 @@ BackendMemory::Create(
   // Fall-back is non-pinned CPU memory.
   if (ptr == nullptr) {
     memtype = TRITONSERVER_MEMORY_CPU;
-    ptr = malloc(byte_size);
+    ptr = reinterpret_cast<char*>(malloc(byte_size));
   }
 
   *mem = new BackendMemory(memtype, ptr, byte_size);
@@ -72,9 +74,9 @@ BackendMemory::Create(
 BackendMemory::~BackendMemory()
 {
   if (memtype_ == TRITONSERVER_MEMORY_CPU) {
-    free ptr;
+    free(buffer_);
   } else if (memtype_ == TRITONSERVER_MEMORY_CPU_PINNED) {
-    cudaFreeHost(ptr);
+    cudaFreeHost(buffer_);
   }
 }
 
