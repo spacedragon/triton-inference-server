@@ -292,8 +292,7 @@ AutoFillOnnx::Create(
     std::unique_ptr<AutoFill>* autofill,
     const std::vector<std::string>& op_libraries)
 {
-    return Status(
-        Status::Code::INTERNAL, "autofill NYI");
+  return Status(Status::Code::INTERNAL, "autofill NYI");
 
 #if 0
   std::unique_ptr<AutoFillOnnxImpl> local_autofill;
