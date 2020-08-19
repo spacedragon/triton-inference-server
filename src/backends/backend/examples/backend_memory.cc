@@ -76,7 +76,9 @@ BackendMemory::~BackendMemory()
   if (memtype_ == TRITONSERVER_MEMORY_CPU) {
     free(buffer_);
   } else if (memtype_ == TRITONSERVER_MEMORY_CPU_PINNED) {
+#ifdef TRITON_ENABLE_GPU
     cudaFreeHost(buffer_);
+#endif  // TRITON_ENABLE_GPU
   }
 }
 
