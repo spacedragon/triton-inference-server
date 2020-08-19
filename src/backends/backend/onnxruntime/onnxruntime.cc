@@ -86,6 +86,11 @@ class ModelState : public nib::BackendModel {
  private:
   ModelState(TRITONBACKEND_Model* triton_model);
   TRITONSERVER_Error* AutoCompleteConfig();
+  TRITONSERVER_Error* AutoCompleteMaxBatch(
+      const OnnxTensorInfoMap& input_tensor_infos,
+      const OnnxTensorInfoMap& output_tensor_infos);
+  TRITONSERVER_Error* AutoCompleteIO(
+      const char* key, const OnnxTensorInfoMap& io_infos);
 
   // Session options used when creating a ORT session.
   std::unique_ptr<OrtSessionOptions, SessionOptionsDeleter> session_options_;
@@ -336,26 +341,147 @@ ModelState::LoadModel(
 TRITONSERVER_Error*
 ModelState::AutoCompleteConfig()
 {
+  // If the model configuration already specifies max_batch_size,
+  // inputs or outputs then don't to any auto-completion.
+  size_t input_cnt = 0;
+  size_t output_cnt = 0;
+  {
+    ni::TritonJson::Value inputs;
+    if (ModelConfig().Find("input", &inputs)) {
+      input_cnt = inputs.ArraySize();
+    }
+    ni::TritonJson::Value outputs;
+    if (ModelConfig().Find("output", &outputs)) {
+      output_cnt = outputs.ArraySize();
+    }
+  }
+
+  if ((MaxBatchSize() > 0) || (input_cnt > 0) || (output_cnt > 0)) {
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_INFO,
+        (std::string("skipping model configuration auto-complete for '") +
+         Name() + "': max_batch_size, inupts or outputs already specified")
+            .c_str());
+    return nullptr;  // success
+  }
+
+  std::string artifact_name;
+  RETURN_IF_ERROR(
+      ModelConfig().MemberAsString("default_model_filename", &artifact_name));
+
   std::string model_path;
   OrtSession* session;
   OrtAllocator* allocator;
+  // FIXME no early return, must unload session
   RETURN_IF_ERROR(LoadModel(
       artifact_name, TRITONSERVER_INSTANCEGROUPKIND_AUTO, 0, &model_path,
-      &session, &allcator));
+      &session, &allocator));
 
-  RETURN_IF_ERROR(FixBatchingSupport(config));
-  RETURN_IF_ERROR(ValidateIOInfoType(model_name_, input_infos_));
-  RETURN_IF_ERROR(FixInputConfig(config));
-  RETURN_IF_ERROR(ValidateIOInfoType(model_name_, output_infos_));
-  RETURN_IF_ERROR(FixOutputConfig(config));
+  OnnxTensorInfoMap input_tensor_infos;
+  RETURN_IF_ERROR(InputInfos(session, allocator, input_tensor_infos));
+  OnnxTensorInfoMap output_tensor_infos;
+  RETURN_IF_ERROR(OutputInfos(session, allocator, output_tensor_infos));
 
-  model_state_->SetModelConfig(xyz);
+  RETURN_IF_ERROR(
+      AutoCompleteMaxBatch(input_tensor_infos, output_tensor_infos));
+  RETURN_IF_ERROR(AutoCompleteIO("input", input_tensor_infos));
+  RETURN_IF_ERROR(AutoCompleteIO("output", output_tensor_infos));
 
   if (session != nullptr) {
-    OnnxLoader::UnloadSession(session_);
+    OnnxLoader::UnloadSession(session);
   }
   // 'allocator' is default allocator which is managed by ONNX Runtime
   // so don't need to free/release
+
+  if (TRITONSERVER_LogIsEnabled(TRITONSERVER_LOG_VERBOSE)) {
+    ni::TritonJson::WriteBuffer buffer;
+    RETURN_IF_ERROR(ModelConfig().PrettyWrite(&buffer));
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_INFO,
+        (std::string("post auto-complete:\n") + buffer.Contents()).c_str());
+  }
+
+  return nullptr;  // success
+}
+
+TRITONSERVER_Error*
+ModelState::AutoCompleteMaxBatch(
+    const OnnxTensorInfoMap& input_tensor_infos,
+    const OnnxTensorInfoMap& output_tensor_infos)
+{
+  // Determine if the model can potentially support batching. All
+  // input and output tensors must have a variable first dimension.
+  bool can_support_batching = true;
+  for (const auto& io_info : input_tensor_infos) {
+    const auto& dims = io_info.second.dims_;
+    if ((dims.size() == 0) || (dims[0] != -1)) {
+      can_support_batching = false;
+    }
+  }
+  for (const auto& io_info : output_tensor_infos) {
+    const auto& dims = io_info.second.dims_;
+    if ((dims.size() == 0) || (dims[0] != -1)) {
+      can_support_batching = false;
+    }
+  }
+
+  // Set max-batch-size to 1 if we have determined that batching is
+  // supported. We need to update the configuration itself as well as
+  // the cached value we have already initialized in the model state.
+  if (can_support_batching) {
+    ni::TritonJson::Value mbs_value;
+    ModelConfig().Find("max_batch_size", &mbs_value);
+    mbs_value.SetInt(1);
+    SetMaxBatchSize(1);
+  }
+
+  return nullptr;  // success
+}
+
+TRITONSERVER_Error*
+ModelState::AutoCompleteIO(const char* key, const OnnxTensorInfoMap& io_infos)
+{
+  ni::TritonJson::Value existing_ios;
+  bool found_ios = ModelConfig().Find(key, &existing_ios);
+
+  ni::TritonJson::Value ios(ModelConfig(), ni::TritonJson::ValueType::ARRAY);
+  for (const auto& io_info : io_infos) {
+    ni::TritonJson::Value io(ModelConfig(), ni::TritonJson::ValueType::OBJECT);
+    RETURN_IF_ERROR(io.AddString("name", io_info.first));
+    RETURN_IF_ERROR(io.AddString(
+        "data_type", std::string("TYPE_") +
+                         TRITONSERVER_DataTypeString(
+                             ConvertFromOnnxDataType(io_info.second.type_))));
+
+    // The model signature supports batching then the first dimension
+    // is -1 and should not appear in the model configuration 'dims'
+    // that we are creating.
+    const auto& io_info_dims = io_info.second.dims_;
+    ni::TritonJson::Value dims(ModelConfig(), ni::TritonJson::ValueType::ARRAY);
+    for (size_t i = (MaxBatchSize() > 0) ? 1 : 0; i < io_info_dims.size();
+         ++i) {
+      RETURN_IF_ERROR(dims.AppendInt(io_info_dims[i]));
+    }
+
+    // If dims are empty then must use a reshape...
+    if (dims.ArraySize() == 0) {
+      RETURN_IF_ERROR(dims.AppendInt(1));
+      ni::TritonJson::Value reshape(
+          ModelConfig(), ni::TritonJson::ValueType::OBJECT);
+      ni::TritonJson::Value reshape_dims(
+          ModelConfig(), ni::TritonJson::ValueType::ARRAY);
+      RETURN_IF_ERROR(reshape.Add("shape", std::move(reshape_dims)));
+      RETURN_IF_ERROR(io.Add("reshape", std::move(reshape)));
+    }
+    RETURN_IF_ERROR(io.Add("dims", std::move(dims)));
+    RETURN_IF_ERROR(ios.Append(std::move(io)));
+  }
+
+  if (found_ios) {
+    existing_ios.Swap(ios);
+  } else {
+    ModelConfig().Add(key, std::move(ios));
+  }
 
   return nullptr;  // success
 }
