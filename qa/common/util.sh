@@ -347,7 +347,7 @@ function check_valgrind_log () {
     
     leak_records=$(grep "are definitely lost" -A 8 $valgrind_log | awk \
     'BEGIN{RS="--";acc=0} !(/cnmem/||/tensorflow::NewSession/||/dl-init/|| \
-    /dl-error/||/StrDup/||/LoadPlan/||/libtorch/||/TRITONSERVER_InferenceTraceNew/) \
+    /dlerror/||/StrDup/||/LoadPlan/||/libtorch/||/TRITONSERVER_InferenceTraceNew/) \
     {print;acc+=1} END{print acc}')
 
     num_leaks=$(echo -e "$leak_records" | tail -n1)
