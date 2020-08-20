@@ -219,12 +219,14 @@ for TARGET in cpu gpu; do
     kill $SERVER_PID
     wait $SERVER_PID
 
+    set +e
     if [ "$TEST_VALGRIND" -eq 1 ]; then
         check_valgrind_log $LEAKCHECK_LOG 
         if [ $? -ne 0 ]; then
             RET=1
         fi
-    fi 
+    fi
+    set -e
 done
 
 if [ $RET -eq 0 ]; then

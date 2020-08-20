@@ -169,12 +169,14 @@ for model_type in FIXED VARIABLE; do
         kill $SERVER_PID
         wait $SERVER_PID
 
+        set +e
         if [ "$TEST_VALGRIND" -eq 1 ]; then
             check_valgrind_log $LEAKCHECK_LOG 
             if [ $? -ne 0 ]; then
                 RET=1
             fi
         fi
+        set -e
     done
 
     # Tests that require TRITONSERVER_DELAY_SCHEDULER so that the
@@ -225,12 +227,14 @@ for model_type in FIXED VARIABLE; do
         kill $SERVER_PID
         wait $SERVER_PID
 
+        set +e
         if [ "$TEST_VALGRIND" -eq 1 ]; then
             check_valgrind_log $LEAKCHECK_LOG 
             if [ $? -ne 0 ]; then
                 RET=1
             fi
         fi
+        set -e
     done
 done
 
@@ -278,12 +282,14 @@ for i in \
     kill $SERVER_PID
     wait $SERVER_PID
 
+    set +e
     if [ "$TEST_VALGRIND" -eq 1 ]; then
         check_valgrind_log $LEAKCHECK_LOG 
         if [ $? -ne 0 ]; then
             RET=1
         fi
     fi
+    set -e
 done
 
 # Tests that run only on the variable-size tensor models and that
@@ -332,12 +338,14 @@ for i in \
     kill $SERVER_PID
     wait $SERVER_PID
 
+    set +e 
     if [ "$TEST_VALGRIND" -eq 1 ]; then
         check_valgrind_log $LEAKCHECK_LOG 
         if [ $? -ne 0 ]; then
             RET=1
         fi
     fi
+    set -e
 done
 
 # Test that verify the 'preserve_ordering' option in dynamic batcher
@@ -411,14 +419,14 @@ if [[ $BACKENDS == *"custom"* ]]; then
     kill $SERVER_PID
     wait $SERVER_PID
     
+    set +e 
     if [ "$TEST_VALGRIND" -eq 1 ]; then
         check_valgrind_log $LEAKCHECK_LOG 
         if [ $? -ne 0 ]; then
             RET=1
         fi
-    fi 
+    fi
 
-    set +e
     python $VERIFY_TIMESTAMPS not_preserve.log
     if [ $? -ne 0 ]; then
         echo -e "\n***\n*** Test Failed\n***"
@@ -468,14 +476,14 @@ if [[ $BACKENDS == *"custom"* ]]; then
     kill $SERVER_PID
     wait $SERVER_PID
 
+    set +e
     if [ "$TEST_VALGRIND" -eq 1 ]; then
         check_valgrind_log $LEAKCHECK_LOG 
         if [ $? -ne 0 ]; then
             RET=1
         fi
-    fi 
+    fi
 
-    set +e
     python $VERIFY_TIMESTAMPS -p preserve.log
     if [ $? -ne 0 ]; then
         echo -e "\n***\n*** Test Failed\n***"

@@ -245,12 +245,14 @@ for model_trial in v 0 1 2 4; do
         kill $SERVER_PID
         wait $SERVER_PID
 
+        set +e
         if [ "$TEST_VALGRIND" -eq 1 ]; then
             check_valgrind_log $LEAKCHECK_LOG 
             if [ $? -ne 0 ]; then
                 RET=1
             fi
         fi
+        set -e
     done
 
     # Tests that require TRITONSERVER_DELAY_SCHEDULER so that the
@@ -317,12 +319,14 @@ for model_trial in v 0 1 2 4; do
         kill $SERVER_PID
         wait $SERVER_PID
 
+        set +e
         if [ "$TEST_VALGRIND" -eq 1 ]; then
             check_valgrind_log $LEAKCHECK_LOG 
             if [ $? -ne 0 ]; then
                 RET=1
             fi
         fi
+        set -e
     done
 done
 
@@ -386,13 +390,15 @@ if [[ $BACKENDS == *"custom"* ]]; then
       unset TRITONSERVER_BACKLOG_DELAY_SCHEDULER
       kill $SERVER_PID
       wait $SERVER_PID
-
+    
+      set +e
       if [ "$TEST_VALGRIND" -eq 1 ]; then
           check_valgrind_log $LEAKCHECK_LOG 
           if [ $? -ne 0 ]; then
               RET=1
           fi
       fi
+      set -e
   done
 fi
 

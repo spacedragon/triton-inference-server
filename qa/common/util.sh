@@ -340,17 +340,19 @@ function check_test_results () {
 #   * OnnxBackend::CreateExecutionContext -> OnnxBackend::Context::ValidateOutputs -> OutputInfos -> InputOutputInfos
 #     -> OrtApis::SessionGetOutputName -> StrDup -> onnxruntime::utils::DefaultAlloc
 #   * NetDefBackend::CreateExecutionContext -> Caffe2WorkspaceCreate
+#   * ModelInferHandler::InferResponseComplete -> TRITONSERVER_ErrorNew
+#   *
 function check_valgrind_log () {
     local valgrind_log=$1 
     
     leak_records=$(grep "are definitely lost" -A 8 $valgrind_log | awk \
-    'BEGIN{RS="--"} !(/cnmem/||/tensorflow::NewSession/||/dl-init/||
-    /StrDup/||/LoadPlan/||/libtorch/) \
+    'BEGIN{RS="--";acc=0} !(/cnmem/||/tensorflow::NewSession/||/dl-init/|| \
+    /dl-error/||/StrDup/||/LoadPlan/||/libtorch/||/TRITONSERVER_InferenceTraceNew/) \
     {print;acc+=1} END{print acc}')
 
     num_leaks=$(echo -e "$leak_records" | tail -n1)
     
-    if [ -n "$num_leaks" ]; then
+    if [ "$num_leaks" != "0" ]; then
         echo -e "$leak_records" | sed '$d'
         echo -e "\n***\n*** Test Failed: $num_leaks memory leaks detected.\n***"
         return 1
