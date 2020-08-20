@@ -237,7 +237,7 @@ ModelState::LoadModel(
           if (instance_group_kind == TRITONSERVER_INSTANCEGROUPKIND_GPU) {
             ni::TritonJson::Value gpu_eas;
             if (eas.Find("gpu_execution_accelerator", &gpu_eas)) {
-              // Set GPU execution execution providers
+              // GPU execution providers
               for (size_t ea_idx = 0; ea_idx < gpu_eas.ArraySize(); ea_idx++) {
                 ni::TritonJson::Value ea;
                 RETURN_IF_ERROR(gpu_eas.IndexAsObject(ea_idx, &ea));
@@ -267,36 +267,34 @@ ModelState::LoadModel(
             }
           }
 
-          // OpenVINO execution accelerator
-          if (instance_group_kind != TRITONSERVER_INSTANCEGROUPKIND_GPU) {
-            ni::TritonJson::Value cpu_eas;
-            if (eas.Find("cpu_execution_accelerator", &cpu_eas)) {
-              for (size_t ea_idx = 0; ea_idx < cpu_eas.ArraySize(); ea_idx++) {
-                ni::TritonJson::Value ea;
-                RETURN_IF_ERROR(cpu_eas.IndexAsObject(ea_idx, &ea));
-                std::string name;
-                RETURN_IF_ERROR(ea.MemberAsString("name", &name));
+          // GPU execution providers
+          ni::TritonJson::Value cpu_eas;
+          if (eas.Find("cpu_execution_accelerator", &cpu_eas)) {
+            for (size_t ea_idx = 0; ea_idx < cpu_eas.ArraySize(); ea_idx++) {
+              ni::TritonJson::Value ea;
+              RETURN_IF_ERROR(cpu_eas.IndexAsObject(ea_idx, &ea));
+              std::string name;
+              RETURN_IF_ERROR(ea.MemberAsString("name", &name));
 #ifdef TRITON_ENABLE_ONNXRUNTIME_OPENVINO
-                if (name == nib::kOpenVINOExecutionAccelerator) {
-                  need_lock = true;
-                  RETURN_IF_ORT_ERROR(
-                      OrtSessionOptionsAppendExecutionProvider_OpenVINO(
-                          soptions, ""));
-                  LOG_MESSAGE(
-                      TRITONSERVER_LOG_VERBOSE,
-                      (std::string(
-                           "OpenVINO Execution Accelerator is set for '") +
-                       Name() + "' on CPU")
-                          .c_str());
-                  continue;
-                }
-#endif  // TRITON_ENABLE_ONNXRUNTIME_OPENVINO
-                return TRITONSERVER_ErrorNew(
-                    TRITONSERVER_ERROR_INVALID_ARG,
-                    (std::string("unknown Execution Accelerator '") + name +
-                     "' is requested")
+              if (name == nib::kOpenVINOExecutionAccelerator) {
+                need_lock = true;
+                RETURN_IF_ORT_ERROR(
+                    OrtSessionOptionsAppendExecutionProvider_OpenVINO(
+                        soptions, ""));
+                LOG_MESSAGE(
+                    TRITONSERVER_LOG_VERBOSE,
+                    (std::string(
+                         "OpenVINO Execution Accelerator is set for '") +
+                     Name() + "' on CPU")
                         .c_str());
+                continue;
               }
+#endif  // TRITON_ENABLE_ONNXRUNTIME_OPENVINO
+              return TRITONSERVER_ErrorNew(
+                  TRITONSERVER_ERROR_INVALID_ARG,
+                  (std::string("unknown Execution Accelerator '") + name +
+                   "' is requested")
+                      .c_str());
             }
           }
         }
@@ -1038,13 +1036,16 @@ ModelInstanceState::ProcessRequests(
           break;
         }
 
-        std::string io_name;
-        err = io.MemberAsString("name", &io_name);
+        // Use names from ModelConfig by reference since the model
+        // config will persist longer than this inference execution.
+        const char* io_name;
+        size_t io_name_len;
+        err = io.MemberAsString("name", &io_name, &io_name_len);
         if (err != nullptr) {
           break;
         }
 
-        output_names.emplace_back(io_name.c_str());
+        output_names.emplace_back(io_name);
         output_tensors_.emplace_back(nullptr);
       }
     }
