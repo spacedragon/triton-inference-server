@@ -27,16 +27,14 @@
 import numpy as np
 import sys
 
-sys.path.append('../..')
+sys.path.append('../../')
 import triton_python_backend_utils as utils
 
 
 class TritonPythonBackend:
 
     def __init__(self, args):
-        pass
-    #    import ipdb; ipdb.set_trace()
-    #    self.model_config = args['model_config']
+        self.model_config = args['model_config']
 
     def __call__(self, requests):
         """ This function is called on inference request.
