@@ -529,6 +529,16 @@ class ModelInstanceState : public nib::BackendModelInstance {
       std::vector<TRITONBACKEND_Response*>* responses,
       nib::BackendInputCollector* collector,
       std::vector<const char*>* input_names, bool* cuda_copy);
+  void SetStringInputTensor(
+      TRITONBACKEND_Request** requests, const uint32_t request_count,
+      std::vector<TRITONBACKEND_Response*>* responses, const char* input_name,
+      std::vector<const char*>* string_ptrs, bool* cuda_copy);
+  void SetStringInputBuffer(
+      const std::string& name, const std::vector<size_t>& expected_byte_sizes,
+      const std::vector<size_t>& expected_element_cnts,
+      std::vector<TRITONBACKEND_Response*>* responses, char* input_buffer,
+      std::vector<const char*>* string_ptrs);
+  void FillStringData(std::vector<const char*>* string_ptrs, size_t cnt);
   void ReadOutputTensors(
       size_t total_batch_size, const std::vector<const char*>& output_names,
       TRITONBACKEND_Request** requests, const uint32_t request_count,
@@ -1164,17 +1174,14 @@ ModelInstanceState::SetInputTensors(
     TRITONSERVER_DataType input_datatype;
     const int64_t* input_shape;
     uint32_t input_dims_count;
-    uint64_t input_byte_size;
-    uint32_t input_buffer_count;
     RESPOND_ALL_AND_RETURN_IF_ERROR(
         responses, request_count,
         TRITONBACKEND_InputProperties(
             input, &input_name, &input_datatype, &input_shape,
-            &input_dims_count, &input_byte_size, &input_buffer_count));
+            &input_dims_count, nullptr, nullptr));
 
     input_names->emplace_back(input_name);
     input_tensors_.emplace_back(nullptr);
-    input_tensor_memories_.emplace_back(nullptr);
 
     // The shape for the entire input patch, [total_batch_size, ...]
     std::vector<int64_t> batchn_shape(
@@ -1189,14 +1196,15 @@ ModelInstanceState::SetInputTensors(
       // Allocate the tensor buffer in pinned memory if possible.
       // [TODO] should be smarter about re-using the memory buffers
       // instead of reallocating them every time.
-      const int64_t input_byte_size =
+      const int64_t batchn_byte_size =
           nib::GetByteSize(input_datatype, batchn_shape);
+
       nib::BackendMemory* input_memory;
       RESPOND_ALL_AND_RETURN_IF_ERROR(
           responses, request_count,
           nib::BackendMemory::Create(
-              TRITONSERVER_MEMORY_CPU_PINNED, input_byte_size, &input_memory));
-      input_tensor_memories_.back() = input_memory;
+              TRITONSERVER_MEMORY_CPU_PINNED, batchn_byte_size, &input_memory));
+      input_tensor_memories_.push_back(input_memory);
 
       TRITONSERVER_MemoryType input_memtype = input_memory->MemoryType();
       char* input_buffer = input_memory->MemoryPtr();
@@ -1209,114 +1217,36 @@ ModelInstanceState::SetInputTensors(
       RESPOND_ALL_AND_RETURN_IF_ORT_ERROR(
           responses, request_count,
           ort_api->CreateTensorWithDataAsOrtValue(
-              allocator_info, (void*)input_buffer, input_byte_size,
+              allocator_info, (void*)input_buffer, batchn_byte_size,
               batchn_shape.data(), batchn_shape.size(),
               ConvertToOnnxDataType(input_datatype), &input_tensors_.back()));
 
       collector->ProcessTensor(
-          input_name, input_buffer, input_byte_size, input_memtype, 0);
+          input_name, input_buffer, batchn_byte_size, input_memtype, 0);
     } else {
-#if 0
-      RESPOND_ALL_AND_RETURN_IF_ERROR(
-          responses, request_count, TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_INTERNAL, "nyi"));
+      // For BYTES input, we need to convert the serialized string
+      // representation into what is required for ORT. ORT expects a
+      // vector of char*, one for each element. For each tensor we get
+      // a copy of the data in a contiguous CPU buffer and then
+      // in-place modify that from the Triton
+      // <int32_len><bytes><int32_len><bytes>... serialization into a
+      // <bytes><null-terminator><bytes><null-terminator>... serialization
+      // and then initialize 'string_ptrs' to point to each <bytes>.
+      std::vector<const char*> string_ptrs;
 
-      // For BYTES input, we need to obtain tensor info differently
-      size_t total_byte_size = 0;
-      std::vector<size_t> expected_byte_sizes;
-      std::vector<size_t> expected_element_cnts;
-      expected_byte_sizes.reserve(request_count);
-      expected_element_cnts.reserve(request_count);
-      for (size_t ridx = 0; ridx < request_count; ++ridx) {
-        TRITONBACKEND_Input* in;
-        RESPOND_AND_SET_NULL_IF_ERROR(&((*responses)[ridx]),
-          TRITONBACKEND_RequestInput(requests[ridx], input_name, &in));
+      SetStringInputTensor(
+          requests, request_count, responses, input_name, &string_ptrs,
+          cuda_copy);
 
-        // Skip input in this request if error response has already been sent.
-        if ((*responses)[ridx] == nullptr) {
-          expected_byte_sizes.push_back(0);
-          expected_element_cnts.push_back(0);
-        } else {
-          expected_element_cnts.push_back(
-              nib::GetElementCount(in->ShapeWithBatchDim()));
-          expected_byte_sizes.push_back(in->Data()->TotalByteSize());
-        }
-        total_byte_size += expected_byte_sizes.back();
-      }
-      // For string input, the copy to contiguous buffer is needed because ORT
-      // expects elements to be C strings thus we need to modify input buffer.
-      // Reserve one more byte at the end of input_buffer to ensure last
-      // element of String data can become valid C string.
-      input_buffers->emplace_back(new AllocatedMemory(
-          total_byte_size + 1, TRITONSERVER_MEMORY_CPU_PINNED, 0));
-      TRITONSERVER_MemoryType mem_type;
-      auto input_buffer = input_buffers->back()->MutableBuffer(&mem_type);
-      size_t buffer_offset = 0;
-      bool string_cuda_copy = false;
-      for (size_t ridx = 0; ridx < requests.size(); ++ridx) {
-        const InferenceRequest::Input* in;
-        auto status = requests[ridx]->ImmutableInput(name, &in);
-        if (status.IsOk() && ((*responses)[ridx] != nullptr)) {
-          const void* src_buffer;
-          size_t src_byte_size;
-          TRITONSERVER_MemoryType src_memory_type;
-          int64_t src_memory_type_id;
-          size_t input_offset = 0;
-          for (size_t idx = 0; idx < in->DataBufferCount(); ++idx) {
-            status = in->DataBuffer(
-                idx, &src_buffer, &src_byte_size, &src_memory_type,
-                &src_memory_type_id);
-            if (status.IsOk()) {
-              if (input_offset + src_byte_size > expected_byte_sizes[ridx]) {
-                status = Status(
-                    Status::Code::INVALID_ARG,
-                    "buffer size for input '" + name +
-                        "' exceeds batch byte size " +
-                        std::to_string(expected_byte_sizes[ridx]));
-              } else {
-                bool cuda_used = false;
-                status = CopyBuffer(
-                    name, src_memory_type, src_memory_type_id, mem_type, 0,
-                    src_byte_size, src_buffer,
-                    input_buffer + buffer_offset + input_offset, stream_,
-                    &cuda_used);
-                string_cuda_copy |= cuda_used;
-              }
-            }
-            if (status.IsOk()) {
-              input_offset += src_byte_size;
-            } else {
-              break;
-            }
-          }
-        }
-        if (!status.IsOk() && ((*responses)[ridx] != nullptr)) {
-          InferenceResponse::SendWithStatus(
-              std::move((*responses)[ridx]),
-              TRITONSERVER_RESPONSE_COMPLETE_FINAL, status);
-        }
-        buffer_offset += expected_byte_sizes[ridx];
-      }
-
-#ifdef TRITON_ENABLE_GPU
-      // Synchronize to ensure the buffer is ready to be modified
-      if (string_cuda_copy) {
-        cudaStreamSynchronize(CudaStream());
-      }
-#endif  // TRITON_ENABLE_GPU
-
-      std::vector<const char*> string_data;
-      // Modify input buffer and set string expected by ORT
-      SetStringInputBuffer(
-          name, expected_byte_sizes, expected_element_cnts, responses,
-          input_buffer, &string_data);
-      input_buffer[total_byte_size] = 0;
-
-      RETURN_IF_ORT_ERROR(ort_api->CreateTensorAsOrtValue(
-          allocator_, batchn_shape.data(), batchn_shape.size(),
-          ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING, &input_tensors_.back()));
-      RETURN_IF_ORT_ERROR(ort_api->FillStringTensor(
-          input_tensors_.back(), string_data.data(), string_data.size()));
-#endif
+      RESPOND_ALL_AND_RETURN_IF_ORT_ERROR(
+          responses, request_count,
+          ort_api->CreateTensorAsOrtValue(
+              allocator_, batchn_shape.data(), batchn_shape.size(),
+              ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING, &input_tensors_.back()));
+      RESPOND_ALL_AND_RETURN_IF_ORT_ERROR(
+          responses, request_count,
+          ort_api->FillStringTensor(
+              input_tensors_.back(), string_ptrs.data(), string_ptrs.size()));
     }
   }
 
@@ -1324,13 +1254,141 @@ ModelInstanceState::SetInputTensors(
   *cuda_copy |= collector->Finalize();
 }
 
-#if 0
 void
-OnnxBackend::Context::SetStringInputBuffer(
-    const std::string& name, const std::vector<size_t>& expected_byte_sizes,
+ModelInstanceState::SetStringInputTensor(
+    TRITONBACKEND_Request** requests, const uint32_t request_count,
+    std::vector<TRITONBACKEND_Response*>* responses, const char* input_name,
+    std::vector<const char*>* string_ptrs, bool* cuda_copy)
+{
+  size_t total_byte_size = 0;
+  std::vector<size_t> expected_byte_sizes;
+  std::vector<size_t> expected_element_cnts;
+  expected_byte_sizes.reserve(request_count);
+  expected_element_cnts.reserve(request_count);
+  for (size_t ridx = 0; ridx < request_count; ++ridx) {
+    TRITONBACKEND_Input* in;
+    RESPOND_AND_SET_NULL_IF_ERROR(
+        &((*responses)[ridx]),
+        TRITONBACKEND_RequestInput(requests[ridx], input_name, &in));
+
+    const int64_t* input_shape;
+    uint32_t input_dims_count;
+    uint64_t input_byte_size;
+    RESPOND_ALL_AND_RETURN_IF_ERROR(
+        responses, request_count,
+        TRITONBACKEND_InputProperties(
+            in, nullptr, nullptr, &input_shape, &input_dims_count,
+            &input_byte_size, nullptr));
+
+    // Skip input in this request if error response has already been sent.
+    if ((*responses)[ridx] == nullptr) {
+      expected_byte_sizes.push_back(0);
+      expected_element_cnts.push_back(0);
+    } else {
+      expected_element_cnts
+          .push_back(nib::GetElementCount(input_shape, input_dims_count));
+              expected_byte_sizes.push_back(input_byte_size);
+    }
+
+    total_byte_size += expected_byte_sizes.back();
+  }
+
+  // For string input, the copy to contiguous buffer is needed because ORT
+  // expects elements to be C strings thus we need to modify input buffer.
+  // Reserve one more byte at the end of input_buffer to ensure last
+  // element of String data can become valid C string.
+  nib::BackendMemory* input_memory;
+  RESPOND_ALL_AND_RETURN_IF_ERROR(
+      responses, request_count,
+      nib::BackendMemory::Create(
+          TRITONSERVER_MEMORY_CPU_PINNED, total_byte_size + 1, &input_memory));
+  input_tensor_memories_.push_back(input_memory);
+
+  const TRITONSERVER_MemoryType mem_type = input_memory->MemoryType();
+  char* input_buffer = input_memory->MemoryPtr();
+
+  size_t buffer_offset = 0;
+  for (size_t ridx = 0; ridx < request_count; ++ridx) {
+    TRITONBACKEND_Input* in;
+    TRITONSERVER_Error* err =
+        TRITONBACKEND_RequestInput(requests[ridx], input_name, &in);
+    if ((err == nullptr) && ((*responses)[ridx] != nullptr)) {
+      uint32_t input_buffer_count;
+      RESPOND_ALL_AND_RETURN_IF_ERROR(
+          responses, request_count,
+          TRITONBACKEND_InputProperties(
+              in, nullptr, nullptr, nullptr, nullptr, nullptr,
+              &input_buffer_count));
+
+      size_t input_offset = 0;
+      for (size_t idx = 0; idx < input_buffer_count; ++idx) {
+        const void* src_buffer;
+        size_t src_byte_size;
+        TRITONSERVER_MemoryType src_memory_type;
+        int64_t src_memory_type_id;
+        err = TRITONBACKEND_InputBuffer(
+            in, idx, &src_buffer, &src_byte_size, &src_memory_type,
+            &src_memory_type_id);
+        if (err == nullptr) {
+          if ((input_offset + src_byte_size) > expected_byte_sizes[ridx]) {
+            err = TRITONSERVER_ErrorNew(
+                TRITONSERVER_ERROR_INVALID_ARG,
+                (std::string("buffer size for input '") + input_name +
+                 "' exceeds batch byte size " +
+                 std::to_string(expected_byte_sizes[ridx]))
+                    .c_str());
+          } else {
+            bool cuda_used = false;
+            err = nib::CopyBuffer(
+                input_name, src_memory_type, src_memory_type_id, mem_type, 0,
+                src_byte_size, src_buffer,
+                input_buffer + buffer_offset + input_offset, CudaStream(),
+                &cuda_used);
+            *cuda_copy |= cuda_used;
+          }
+        }
+
+        if (err == nullptr) {
+          input_offset += src_byte_size;
+        } else {
+          break;
+        }
+      }
+    }
+
+    if (err != nullptr) {
+      if ((*responses)[ridx] != nullptr) {
+        RESPOND_AND_SET_NULL_IF_ERROR(&((*responses)[ridx]), err);
+      }
+
+      TRITONSERVER_ErrorDelete(err);
+    }
+
+    buffer_offset += expected_byte_sizes[ridx];
+  }
+
+#ifdef TRITON_ENABLE_GPU
+  // Synchronize to ensure the buffer is ready to be modified
+  if (*cuda_copy) {
+    cudaStreamSynchronize(CudaStream());
+    *cuda_copy = false;
+  }
+#endif  // TRITON_ENABLE_GPU
+
+  // Modify input buffer and set string expected by ORT
+  SetStringInputBuffer(
+      input_name, expected_byte_sizes, expected_element_cnts, responses,
+      input_buffer, string_ptrs);
+  input_buffer[total_byte_size] = 0;
+}
+
+void
+ModelInstanceState::SetStringInputBuffer(
+    const std::string& input_name,
+    const std::vector<size_t>& expected_byte_sizes,
     const std::vector<size_t>& expected_element_cnts,
-    std::vector<std::unique_ptr<InferenceResponse>>* responses,
-    char* input_buffer, std::vector<const char*>* string_data)
+    std::vector<TRITONBACKEND_Response*>* responses, char* input_buffer,
+    std::vector<const char*>* string_ptrs)
 {
   // offset for each response
   size_t buffer_copy_offset = 0;
@@ -1345,15 +1403,15 @@ OnnxBackend::Context::SetStringInputBuffer(
       // Continue if the remaining bytes may still contain size info
       while (remaining_bytes >= sizeof(uint32_t)) {
         if (element_cnt >= expected_element_cnt) {
-          InferenceResponse::SendWithStatus(
-              std::move((*responses)[idx]),
-              TRITONSERVER_RESPONSE_COMPLETE_FINAL,
-              Status(
-                  Status::Code::INVALID_ARG,
-                  "unexpected number of string elements " +
-                      std::to_string(element_cnt + 1) +
-                      " for inference input '" + name + "', expecting " +
-                      std::to_string(expected_element_cnt)));
+          RESPOND_AND_SET_NULL_IF_ERROR(
+              &((*responses)[idx]),
+              TRITONSERVER_ErrorNew(
+                  TRITONSERVER_ERROR_INVALID_ARG,
+                  (std::string("unexpected number of string elements ") +
+                   std::to_string(element_cnt + 1) + " for inference input '" +
+                   input_name + "', expecting " +
+                   std::to_string(expected_element_cnt))
+                      .c_str()));
           break;
         }
 
@@ -1364,18 +1422,18 @@ OnnxBackend::Context::SetStringInputBuffer(
         *data_content = 0;
         data_content = data_content + sizeof(uint32_t);
         if (len > remaining_bytes) {
-          InferenceResponse::SendWithStatus(
-              std::move((*responses)[idx]),
-              TRITONSERVER_RESPONSE_COMPLETE_FINAL,
-              Status(
-                  Status::Code::INVALID_ARG,
-                  "incomplete string data for inference input '" + name +
-                      "', expecting string of length " + std::to_string(len) +
-                      " but only " + std::to_string(remaining_bytes) +
-                      " bytes available"));
+          RESPOND_AND_SET_NULL_IF_ERROR(
+              &((*responses)[idx]),
+              TRITONSERVER_ErrorNew(
+                  TRITONSERVER_ERROR_INVALID_ARG,
+                  (std::string("incomplete string data for inference input '") +
+                   input_name + "', expecting string of length " +
+                   std::to_string(len) + " but only " +
+                   std::to_string(remaining_bytes) + " bytes available")
+                      .c_str()));
           break;
         } else {
-          string_data->push_back(data_content);
+          string_ptrs->push_back(data_content);
           element_cnt++;
           data_content = data_content + len;
           remaining_bytes -= len;
@@ -1383,22 +1441,20 @@ OnnxBackend::Context::SetStringInputBuffer(
       }
     }
 
-    FillStringData(string_data, expected_element_cnt - element_cnt);
-
+    FillStringData(string_ptrs, expected_element_cnt - element_cnt);
     buffer_copy_offset += expected_byte_size;
   }
 }
 
 void
-OnnxBackend::Context::FillStringData(
-    std::vector<const char*>* string_data, size_t cnt)
+ModelInstanceState::FillStringData(
+    std::vector<const char*>* string_ptrs, size_t cnt)
 {
   static const char* empty = "";
   for (size_t c = 0; c < cnt; c++) {
-    string_data->push_back(empty);
+    string_ptrs->push_back(empty);
   }
 }
-#endif
 
 void
 ModelInstanceState::ReadOutputTensors(
@@ -1553,7 +1609,7 @@ OnnxBackend::Context::SetStringOutputBuffer(
           const uint32_t len =
               offsets[element_idx + e + 1] - offsets[element_idx + e];
           // Prepend size of the string
-          status = CopyBuffer(
+          status = nib::CopyBuffer(
               name, TRITONSERVER_MEMORY_CPU /* src_memory_type */,
               0 /* src_memory_type_id */, actual_memory_type,
               actual_memory_type_id, sizeof(uint32_t),
@@ -1568,7 +1624,7 @@ OnnxBackend::Context::SetStringOutputBuffer(
           copied_byte_size += sizeof(uint32_t);
 
           // Copy raw string content
-          status = CopyBuffer(
+          status = nib::CopyBuffer(
               name, TRITONSERVER_MEMORY_CPU /* src_memory_type */,
               0 /* src_memory_type_id */, actual_memory_type,
               actual_memory_type_id, len, content + offsets[element_idx + e],
