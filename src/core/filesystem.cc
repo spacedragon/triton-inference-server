@@ -60,6 +60,9 @@
 #include <blob/blob_client.h>
 #include <storage_account.h>
 #include <storage_credential.h>
+#include <src/core/extra/msi_credential.hpp>
+#include <rapidjson/document.h>
+#include <curl/curl.h>
 #endif  // TRITON_ENABLE_AZURE_STORAGE
 
 namespace nvidia { namespace inferenceserver {
@@ -314,7 +317,7 @@ AppendSlash(const std::string& name)
 #ifdef TRITON_ENABLE_GCS
 
 namespace gcs = google::cloud::storage;
-
+ 
 class GCSFileSystem : public FileSystem {
  public:
   GCSFileSystem();
@@ -697,8 +700,7 @@ const std::string AS_URL_PATTERN = "as://([^/]+)/([^/?]+)(?:/([^?]*))?(\\?.*)?";
 
 class ASFileSystem :  public FileSystem {
  public:
-  ASFileSystem(const std::string& s3_path);
-  Status CheckClient();
+  ASFileSystem(std::shared_ptr<as::blob_client> client);
 
   Status FileExists(const std::string& path, bool* exists);
   Status IsDirectory(const std::string& path, bool* is_dir);
@@ -713,6 +715,8 @@ class ASFileSystem :  public FileSystem {
   Status LocalizeDirectory(
       const std::string& path, std::shared_ptr<LocalizedDirectory>* localized);
   Status WriteTextFile(const std::string& path, const std::string& contents);
+
+  Status RefreshToken();
 
  private:
   Status ParsePath(
@@ -729,6 +733,8 @@ class ASFileSystem :  public FileSystem {
       const std::string& container, const std::string& path,
       const std::string& dest);
   re2::RE2 as_regex_;
+  std::string access_token_;
+  time_t token_expires_;
 };
 
 Status
@@ -736,63 +742,19 @@ ASFileSystem::ParsePath(
     const std::string& path, std::string* container, std::string* object)
 {
   std::string host_name, query;
-  if (!RE2::FullMatch(path, as_regex_, &host_name, container, object, &query)) {
+  if (!RE2::FullMatch(path, as_regex_, &host_name, container, object, &query)) {  
     return Status(
         Status::Code::INTERNAL, "Invalid azure storage path: " + path);
   }
-  LOG_VERBOSE(1) << *container << " - " << *object;
-  return Status::Success;
+
+  return Status::Success; 
 }
 
-ASFileSystem::ASFileSystem(const std::string& path)
-    : as_regex_(AS_URL_PATTERN)
+ASFileSystem::ASFileSystem(std::shared_ptr<as::blob_client> client)
+  :as_regex_(AS_URL_PATTERN)
 {
-  const char* account_str = std::getenv("AZURE_STORAGE_ACCOUNT");
-  const char* account_key = std::getenv("AZURE_STORAGE_KEY");
-  std::shared_ptr<as::storage_account> account = nullptr;
-  std::string host_name, container, blob_path, query;
-  if (RE2::FullMatch(
-          path, as_regex_, &host_name, &container, &blob_path, &query)) {
-    size_t pos = host_name.rfind(".blob.core.windows.net");
-    std::string account_name;
-    if (account_str == NULL) { 
-      if (pos != std::string::npos) {
-        account_name = host_name.substr(0, pos);
-      } else {
-        account_name = host_name;
-      }
-    } else {
-      account_name = std::string(account_str);
-    }
-
-    std::shared_ptr<as::storage_credential> cred;
-
-    if (account_key != NULL)  // Shared Key
-    {
-      cred = std::make_shared<as::shared_key_credential>(
-          account_name, account_key);
-    } else if (query.find("sig=") != std::string::npos) {
-      // Shared Access Signature
-      cred = std::make_shared<as::shared_access_signature_credential>(query);
-    } else {
-      cred = std::make_shared<as::anonymous_credential>();
-    }
-
-    account = std::make_shared<as::storage_account>(
-        account_name, cred, /* use_https */ true);
-    client_ = std::make_shared<as::blob_client>(account, /*max_concurrency*/ 16);
-  }
+  client_ = client;
 }
-
-Status ASFileSystem::CheckClient() 
-{
-  if (client_ == nullptr) 
-  {
-    return Status(Status::Code::INTERNAL, "blob client initialize failed.");
-  }
-  return Status::Success;
-}
-
 
 Status
 ASFileSystem::FileModificationTime(const std::string& path, int64_t* mtime_ns)
@@ -800,7 +762,7 @@ ASFileSystem::FileModificationTime(const std::string& path, int64_t* mtime_ns)
   as::blob_client_wrapper bc(client_);
   std::string container, object_path;
   RETURN_IF_ERROR(ParsePath(path, &container, &object_path));
-
+  
   auto blobProperty = bc.get_blob_property(container, object_path);
   auto time =
       std::chrono::system_clock::from_time_t(blobProperty.last_modified);
@@ -822,7 +784,6 @@ ASFileSystem::ListDirectory(
 {
 
   as::blob_client_wrapper bc(client_);
-
   // Append a slash to make it easier to list contents
   std::string full_dir = AppendSlash(dir_path);
   auto blobs = bc.list_blobs_segmented(container, "/", "", full_dir);
@@ -851,6 +812,7 @@ ASFileSystem::GetDirectoryContents(
   };
   std::string container, dir_path;
   RETURN_IF_ERROR(ParsePath(path, &container, &dir_path));
+  
   return ListDirectory(container, dir_path, func);
 }
 
@@ -867,6 +829,7 @@ ASFileSystem::GetDirectorySubdirs(
   };
   std::string container, dir_path;
   RETURN_IF_ERROR(ParsePath(path, &container, &dir_path));
+  
   return ListDirectory(container, dir_path, func);
 }
 
@@ -883,6 +846,7 @@ ASFileSystem::GetDirectoryFiles(
   };
   std::string container, dir_path;
   RETURN_IF_ERROR(ParsePath(path, &container, &dir_path));
+  
   return ListDirectory(container, dir_path, func);
 }
 
@@ -892,7 +856,7 @@ ASFileSystem::IsDirectory(const std::string& path, bool* is_dir)
   *is_dir = false;
   std::string container, object_path;
   RETURN_IF_ERROR(ParsePath(path, &container, &object_path));
-
+  
   // Check if the bucket exists
   as::blob_client_wrapper bc(client_);
 
@@ -914,6 +878,7 @@ ASFileSystem::ReadTextFile(const std::string& path, std::string* contents)
   as::blob_client_wrapper bc(client_);
   std::string container, object_path;
   RETURN_IF_ERROR(ParsePath(path, &container, &object_path));
+  
   using namespace azure::storage_lite;
   std::ostringstream out_stream;
   bc.download_blob_to_stream(container, object_path, 0, 0, out_stream);
@@ -933,6 +898,7 @@ ASFileSystem::FileExists(const std::string& path, bool* exists)
 
   std::string container, object;
   RETURN_IF_ERROR(ParsePath(path, &container, &object));
+  
   as::blob_client_wrapper bc(client_);
   auto blobs = bc.list_blobs_segmented(container, "/", "", object, 1);
   if (errno != 0) {
@@ -1012,6 +978,7 @@ ASFileSystem::LocalizeDirectory(
 
   std::string container, object;
   RETURN_IF_ERROR(ParsePath(path, &container, &object));
+  
   return DownloadFolder(container, object, dest);
 }
 
@@ -1023,6 +990,7 @@ ASFileSystem::WriteTextFile(
   std::istream is(ss.rdbuf());
   std::string container, object;
   RETURN_IF_ERROR(ParsePath(path, &container, &object));
+  
   std::vector<std::pair<std::string, std::string>> metadata;
   auto ret =
       client_->upload_block_blob_from_stream(container, object, is, metadata)
@@ -1034,8 +1002,70 @@ ASFileSystem::WriteTextFile(
   }
   return Status::Success;
 }
-#endif  // TRITON_ENABLE_AZURE_STORAGE
 
+Status 
+CreateASFileSystem(const std::string& path, FileSystem** file_system){
+  re2::RE2 regex(AS_URL_PATTERN);
+  const char* account_str = std::getenv("AZURE_STORAGE_ACCOUNT");
+  const char* account_key = std::getenv("AZURE_STORAGE_KEY");
+  std::shared_ptr<as::storage_account> account = nullptr;
+  std::string host_name, container, blob_path, query;
+  if (RE2::FullMatch(
+          path, regex, &host_name, &container, &blob_path, &query)) {
+    size_t pos = host_name.rfind(".blob.core.windows.net");
+    std::string account_name;
+    if (account_str == NULL) { 
+      if (pos != std::string::npos) {
+        account_name = host_name.substr(0, pos);
+      } else {
+        account_name = host_name;
+      }
+    } else {
+      account_name = std::string(account_str);
+    }
+
+    std::shared_ptr<as::storage_credential> cred;
+
+    if (account_key != NULL)  // Shared Key
+    {
+      cred = std::make_shared<as::shared_key_credential>(
+          account_name, account_key);
+    } else if (query.find("sig=") != std::string::npos) {
+      // Shared Access Signature
+      cred = std::make_shared<as::shared_access_signature_credential>(query);
+    } else {
+      const char* msi_enabled = std::getenv("AZURE_MSI_ENABLED");
+      if (msi_enabled != NULL) {
+        // MSI 
+        auto msi_cred = std::make_shared<as::msi_credential>();
+        const char* msi_url = std::getenv("AZURE_MSI_URL");
+        if (msi_url != NULL) {
+          msi_cred->set_msi_url(std::string(msi_url));
+        }
+        std::string error;
+        if (!msi_cred->refresh_token(error)) {
+            LOG_ERROR << "msi refresh token failed. " << error;
+            return Status(Status::Code::INTERNAL, error);
+        };
+        cred = msi_cred;
+      } else {
+        // anonymous
+        cred = std::make_shared<as::anonymous_credential>();
+      }
+    }
+
+    account = std::make_shared<as::storage_account>(
+        account_name, cred, /* use_https */ true);
+    auto client = std::make_shared<as::blob_client>(account, /*max_concurrency*/ 16);
+    static ASFileSystem fs(client);
+    *file_system = &fs;
+    return Status::Success;
+  } else {
+    return Status(Status::Code::INTERNAL, "Invalid address "+path);
+  }
+}
+
+#endif  // TRITON_ENABLE_AZURE_STORAGE
 
 #ifdef TRITON_ENABLE_S3
 
@@ -1527,9 +1557,7 @@ GetFileSystem(const std::string& path, FileSystem** file_system)
         "as:// file-system not supported. To enable, build with "
         "-DTRITON_ENABLE_AZURE_STORAGE=ON.");
 #else
-    static ASFileSystem as_fs(path);
-    RETURN_IF_ERROR(as_fs.CheckClient());
-    *file_system = &as_fs;
+    RETURN_IF_ERROR(CreateASFileSystem(path, file_system));
     return Status::Success;
 #endif  // TRITON_ENABLE_AZURE_STORAGE
   }
