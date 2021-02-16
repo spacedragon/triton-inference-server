@@ -87,6 +87,8 @@ RUN mkdir -p qa/common && \
     mkdir qa/L0_secure_grpc/models && \
     cp -r docs/examples/model_repository/simple qa/L0_secure_grpc/models/. && \
     cp -r /workspace/docs/examples/ensemble_model_repository qa/L0_perf_analyzer/ && \
+    cp -r /workspace/docs/examples/ensemble_model_repository qa/L0_grpc/ && \
+    cp -r /workspace/docs/examples/ensemble_model_repository qa/L0_http/ && \
     cp /tmp/tritonbuild/install/bin/simple qa/L0_simple_lib/. && \
     cp /tmp/tritonbuild/install/bin/memory_alloc qa/L0_io/. && \
     cp /tmp/tritonbuild/tritonserver/build/test-util/install/bin/memory_test qa/L0_memory/.
@@ -205,6 +207,8 @@ RUN cp /tmp/tritonbuild/tritonserver/build/test-util/install/lib/libidentity.so 
     cp -r qa/L0_infer/. qa/L0_infer_cudashm && \
     mkdir -p qa/L0_infer_valgrind && \
     cp -r qa/L0_infer/. qa/L0_infer_valgrind && \
+    mkdir -p qa/L0_infer_tf2 && \
+    cp -r qa/L0_infer/. qa/L0_infer_tf2 && \
     mkdir -p qa/L0_trt_shape_tensors_shm && \
     cp -r qa/L0_trt_shape_tensors/. qa/L0_trt_shape_tensors_shm && \
     mkdir -p qa/L0_trt_shape_tensors_cudashm && \
@@ -246,13 +250,6 @@ RUN mkdir -p qa/L0_decoupled/models/simple_repeat/1 && \
     mkdir -p qa/L0_decoupled/models/sequence_repeat/1 && \
     mkdir -p qa/L0_decoupled/models/repeat_square/1 && \
     mkdir -p qa/L0_decoupled/models/nested_square/1
-
-# Generating the docs requires the docs source and the source code so
-# copy that into L0_docs so that it is available when that test runs.
-RUN cp VERSION qa/L0_docs/. && \
-    cp README.rst qa/L0_docs/. && \
-    cp -r docs qa/L0_docs/. && \
-    cp -r src qa/L0_docs/.
 
 ############################################################################
 ## Copy artifacts from client container
@@ -318,7 +315,7 @@ RUN rm -f /usr/bin/python && \
     ln -s /usr/bin/python3 /usr/bin/python
 
 RUN pip3 install --upgrade wheel setuptools && \
-    pip3 install --upgrade numpy pillow future grpcio requests gsutil awscli six boofuzz grpcio-channelz
+    pip3 install --upgrade numpy pillow future grpcio requests gsutil awscli six boofuzz grpcio-channelz azure-cli 
 
 # need protoc-gen-go to generate go specific gRPC modules
 RUN go get github.com/golang/protobuf/protoc-gen-go && \

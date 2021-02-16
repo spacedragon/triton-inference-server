@@ -109,8 +109,7 @@ def gitclone(cwd, repo, tag, subdir):
     log_verbose('git clone of repo "{}" at tag "{}"'.format(repo, tag))
     p = subprocess.Popen([
         'git', 'clone', '--recursive', '--single-branch', '--depth=1', '-b',
-        tag, 'https://github.com/triton-inference-server/{}.git'.format(repo),
-        subdir
+        tag, '{}/{}.git'.format(FLAGS.github_organization, repo), subdir
     ],
                          cwd=cwd)
     p.wait()
@@ -182,6 +181,8 @@ def core_cmake_args(components, backends, install_dir):
         cmake_enable('gcs' in FLAGS.filesystem)))
     cargs.append('-DTRITON_ENABLE_S3:BOOL={}'.format(
         cmake_enable('s3' in FLAGS.filesystem)))
+    cargs.append('-DTRITON_ENABLE_AZURE_STORAGE:BOOL={}'.format(
+        cmake_enable('azure_storage' in FLAGS.filesystem)))
 
     cargs.append('-DTRITON_ENABLE_TENSORFLOW={}'.format(
         cmake_enable(('tensorflow1' in backends) or
@@ -413,6 +414,7 @@ ARG TRITON_CONTAINER_VERSION
 # libcurl4-openSSL-dev is needed for GCS
 # python3-dev is needed by Torchvision
 # python3-pip is needed by python backend
+# uuid-dev and pkg-config is needed for Azure Storage
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
             autoconf \
@@ -435,7 +437,9 @@ RUN apt-get update && \
             software-properties-common \
             unzip \
             wget \
-            zlib1g-dev && \
+            zlib1g-dev \
+            pkg-config \
+            uuid-dev && \       
     rm -rf /var/lib/apt/lists/*
 
 # grpcio-tools grpcio-channelz are needed by python backend
@@ -629,7 +633,7 @@ ENV TF_AUTOTUNE_THRESHOLD       2
 # Intel MKL FATAL ERROR: Cannot load libmkl_intel_thread.so
 ENV MKL_THREADING_LAYER GNU
 
-# Create a user that can be used to run the triton-server as
+# Create a user that can be used to run triton as
 # non-root. Make sure that this user to given ID 1000. All server
 # artifacts copied below are assign to this user.
 ENV TRITON_SERVER_USER=triton-server
@@ -642,23 +646,21 @@ RUN userdel tensorrt-server > /dev/null 2>&1 || true && \
 
 # libgoogle-glog0v5 is needed by caffe2 libraries.
 # libcurl is needed for GCS
+#
+# FIXME python3, python3-pip and the pip installs should only be
+# installed for python backend and onnxruntime backend (and then only
+# if openvino is enabled)
 RUN apt-get update && \
-    if [ $(cat /etc/os-release | grep 'VERSION_ID="16.04"' | wc -l) -ne 0 ]; then \
-        apt-get install -y --no-install-recommends \
-                libb64-0d \
-                libcurl3-dev \
-                libgoogle-glog0v5 \
-                libre2-1v5; \
-    elif [ $(cat /etc/os-release | grep 'VERSION_ID="18.04"' | wc -l) -ne 0 ]; then \
-        apt-get install -y --no-install-recommends \
-                libb64-0d \
-                libcurl4-openssl-dev \
-                libgoogle-glog0v5 \
-                libre2-4; \
-    else \
-        echo "Ubuntu version must be either 16.04 or 18.04" && \
-        exit 1; \
-    fi && \
+    apt-get install -y --no-install-recommends \
+         libb64-0d \
+         libcurl4-openssl-dev \
+         libgoogle-glog0v5 \
+         libre2-4 \
+         python3 \
+         python3-pip && \
+    pip3 install --upgrade pip && \
+    pip3 install --upgrade wheel setuptools && \
+    pip3 install --upgrade grpcio-tools grpcio-channelz numpy && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/tritonserver
@@ -954,6 +956,14 @@ if __name__ == '__main__':
         default=None,
         help='Build parallelism. Defaults to 2 * number-of-cores.')
 
+    parser.add_argument(
+        '--github-organization',
+        type=str,
+        required=False,
+        default='https://github.com/triton-inference-server',
+        help=
+        'The GitHub organization containing the repos used for the build. Defaults to "https://github.com/triton-inference-server".'
+    )
     parser.add_argument('--version',
                         type=str,
                         required=False,
@@ -1036,7 +1046,7 @@ if __name__ == '__main__':
         action='append',
         required=False,
         help=
-        'Include specified filesystem in build. Allowed values are "gcs" and "s3".'
+        'Include specified filesystem in build. Allowed values are "gcs", "azure_storage" and "s3".'
     )
     parser.add_argument(
         '-b',
